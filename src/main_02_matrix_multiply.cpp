@@ -129,14 +129,14 @@ void run(int argc, char** argv)
             if (algorithm == "CPU with OpenMP") {
                 cpu::multiply(input_a_cpu, input_b_cpu, output_c_cpu, w, h, k, true);
             } else {
-                throw std::runtime_error(CODE_IS_NOT_IMPLEMENTED); // TODO remove me
                 // _______________________________OpenCL_____________________________________________
                 if (context.type() == gpu::Context::TypeOpenCL) {
+                    // Рабочее пространство w x h (один WorkItem на элемент матрицы C), рабочие группы 16x16
+                    gpu::WorkSize workSize(GROUP_SIZE_X, GROUP_SIZE_Y, w, h);
                     if (algorithm == "01 naive") {
-                        // TODO обязательно замените размер рабочей группы 1x1 на больший
-                        ocl_matrix03MultiplyNaive.exec(gpu::WorkSize(1, 1, w, h), matrix_a_gpu, matrix_b_gpu, matrix_c_gpu, w, h, k);
+                        ocl_matrix03MultiplyNaive.exec(workSize, matrix_a_gpu, matrix_b_gpu, matrix_c_gpu, w, h, k);
                     } else if (algorithm == "02 using local memory") {
-                        ocl_matrix04MultiplyViaLocalMemory.exec(gpu::WorkSize(1, 1, w, h), matrix_a_gpu, matrix_b_gpu, matrix_c_gpu, w, h, k);
+                        ocl_matrix04MultiplyViaLocalMemory.exec(workSize, matrix_a_gpu, matrix_b_gpu, matrix_c_gpu, w, h, k);
                     } else {
                         rassert(false, 7652345234321, algorithm, algorithm_index);
                     }
