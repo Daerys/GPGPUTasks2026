@@ -86,37 +86,63 @@ void run(int argc, char** argv)
         std::cout << "CPU std::sort effective RAM bandwidth: " << memory_size_gb / elapsed << " GB/s (" << n / 1e6 / elapsed << " uint millions/s)" << std::endl;
     }
 
+    const unsigned int passes = 32 / RADIX_BITS;
+    const unsigned int groups = (n + GROUP_SIZE - 1) / GROUP_SIZE;
+    const unsigned int m = RADIX_SIZE * groups;
+
+    // Пирамида попарных сумм для скана: уровень 0 - сам массив counts, уровни 1.. лежат подряд в одном буфере
+    std::vector<unsigned int> level_size(1, m), level_offset(1, 0);
+    unsigned int sums_total = 0;
+    while ((1ull << level_size.size()) <= m) {
+        unsigned int sz = (level_size.back() + 1) / 2;
+        level_offset.push_back(sums_total);
+        level_size.push_back(sz);
+        sums_total += sz;
+    }
+    const unsigned int levels = level_size.size();
+
     // Аллоцируем буферы в VRAM
     gpu::gpu_mem_32u input_gpu(n);
-    gpu::gpu_mem_32u buffer1_gpu(n), buffer2_gpu(n), buffer3_gpu(n), buffer4_gpu(n); // TODO это просто шаблонка, можете переименовать эти буферы, сделать другого размера/типа, удалить часть, добавить новые
+    gpu::gpu_mem_32u buffer_tmp_gpu(n);
+    gpu::gpu_mem_32u counts_gpu(m);
+    gpu::gpu_mem_32u sums_gpu(sums_total);
+    gpu::gpu_mem_32u offsets_gpu(m);
     gpu::gpu_mem_32u buffer_output_gpu(n);
 
     // Прогружаем входные данные по PCI-E шине: CPU RAM -> GPU VRAM
     input_gpu.writeN(as.data(), n);
-    // Советую занулить (или еще лучше - заполнить какой-то уникальной константой, например 255) все буферы
-    // В некоторых случаях это ускоряет отладку, но обратите внимание, что fill реализован через копию множества нулей по PCI-E, то есть он очень медленный
-    // Если вам нужно занулять буферы в процессе вычислений - используйте кернел который это сделает (см. кернел fill_buffer_with_zeros)
-    buffer1_gpu.fill(255);
-    buffer2_gpu.fill(255);
-    buffer3_gpu.fill(255);
-    buffer4_gpu.fill(255);
+    buffer_tmp_gpu.fill(255);
     buffer_output_gpu.fill(255);
 
     // Запускаем кернел (несколько раз и с замером времени выполнения)
     std::vector<double> times;
-    for (int iter = 0; iter < 10; ++iter) { // TODO при отладке запускайте одну итерацию
+    for (int iter = 0; iter < 10; ++iter) {
         timer t;
 
         // Запускаем кернел, с указанием размера рабочего пространства и передачей всех аргументов
         // Если хотите - можете удалить ветвление здесь и оставить только тот код который соответствует вашему выбору API
         if (context.type() == gpu::Context::TypeOpenCL) {
-            // TODO
-            throw std::runtime_error(CODE_IS_NOT_IMPLEMENTED);
-            // ocl_fillBufferWithZeros.exec();
-            // ocl_radixSort01LocalCounting.exec();
-            // ocl_radixSort02GlobalPrefixesScanSumReduction.exec();
-            // ocl_radixSort03GlobalPrefixesScanAccumulation.exec();
-            // ocl_radixSort04Scatter.exec();
+            const gpu::gpu_mem_32u* src = &input_gpu;
+            for (unsigned int pass = 0; pass < passes; ++pass) {
+                gpu::gpu_mem_32u* dst = (pass % 2 == 0) ? &buffer_tmp_gpu : &buffer_output_gpu;
+                unsigned int shift = pass * RADIX_BITS;
+
+                ocl_radixSort01LocalCounting.exec(gpu::WorkSize(GROUP_SIZE, groups * GROUP_SIZE),
+                    *src, counts_gpu, static_cast<unsigned int>(n), shift, groups);
+
+                for (unsigned int k = 1; k < levels; ++k) {
+                    ocl_radixSort02GlobalPrefixesScanSumReduction.exec(gpu::WorkSize(GROUP_SIZE, level_size[k]),
+                        counts_gpu, sums_gpu, k, level_size[k - 1], level_offset[k - 1], level_offset[k]);
+                }
+
+                ocl_radixSort03GlobalPrefixesScanAccumulation.exec(gpu::WorkSize(GROUP_SIZE, m),
+                    counts_gpu, sums_gpu, offsets_gpu, m, levels);
+
+                ocl_radixSort04Scatter.exec(gpu::WorkSize(GROUP_SIZE, groups * GROUP_SIZE),
+                    *src, offsets_gpu, *dst, static_cast<unsigned int>(n), shift, groups);
+
+                src = dst;
+            }
         } else if (context.type() == gpu::Context::TypeCUDA) {
             // TODO
             throw std::runtime_error(CODE_IS_NOT_IMPLEMENTED);
